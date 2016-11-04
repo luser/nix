@@ -1,6 +1,9 @@
 use libc::{self, pid_t, c_int};
 use {Errno, Result};
 
+#[cfg(any(target_os = "linux",
+          target_os = "android"))]
+use sys::ptrace::ptrace::{PTRACE_EVENT_FORK, PTRACE_EVENT_VFORK, PTRACE_EVENT_CLONE, PTRACE_EVENT_EXEC, PTRACE_EVENT_VFORK_DONE, PTRACE_EVENT_EXIT, PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP};
 use sys::signal::Signal;
 
 mod ffi {
@@ -39,11 +42,44 @@ bitflags!(
           target_os = "android"))]
 const WSTOPPED: WaitPidFlag = WUNTRACED;
 
+#[cfg(any(target_os = "linux",
+          target_os = "android"))]
+#[derive(Eq, PartialEq, Clone, Copy, Debug)]
+#[repr(i32)]
+pub enum PtraceEvent {
+    Fork = PTRACE_EVENT_FORK,
+    Vfork = PTRACE_EVENT_VFORK,
+    Clone = PTRACE_EVENT_CLONE,
+    Exec = PTRACE_EVENT_EXEC,
+    VforkDone = PTRACE_EVENT_VFORK_DONE,
+    Exit = PTRACE_EVENT_EXIT,
+    Seccomp = PTRACE_EVENT_SECCOMP,
+    Stop = PTRACE_EVENT_STOP,
+}
+
+#[cfg(any(target_os = "linux",
+          target_os = "android"))]
+impl PtraceEvent {
+    #[inline]
+    pub fn from_c_int(event: libc::c_int) -> Option<PtraceEvent> {
+        use std::mem;
+
+        if (event >= PTRACE_EVENT_FORK && event <= PTRACE_EVENT_SECCOMP) || event == PTRACE_EVENT_STOP {
+            Some(unsafe { mem::transmute(event) })
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub enum WaitStatus {
     Exited(pid_t, i8),
     Signaled(pid_t, Signal, bool),
     Stopped(pid_t, Signal),
+    #[cfg(any(target_os = "linux",
+              target_os = "android"))]
+    StoppedPtraceEvent(pid_t, PtraceEvent),
     Continued(pid_t),
     StillAlive
 }
@@ -51,7 +87,9 @@ pub enum WaitStatus {
 #[cfg(any(target_os = "linux",
           target_os = "android"))]
 mod status {
+    use libc::pid_t;
     use sys::signal::Signal;
+    use super::{PtraceEvent, WaitStatus};
 
     pub fn exited(status: i32) -> bool {
         (status & 0x7F) == 0
@@ -76,9 +114,17 @@ mod status {
     pub fn stopped(status: i32) -> bool {
         (status & 0xff) == 0x7f
     }
-
     pub fn stop_signal(status: i32) -> Signal {
         Signal::from_c_int((status & 0xFF00) >> 8).unwrap()
+    }
+
+    pub fn decode_ptrace_event(pid: pid_t, status: i32) -> Option<WaitStatus> {
+        if stop_signal(status) == Signal::SIGTRAP {
+            PtraceEvent::from_c_int((status & 0xFF0000) >> 16)
+                .map(|event| WaitStatus::StoppedPtraceEvent(pid, event))
+        } else {
+            None
+        }
     }
 
     pub fn continued(status: i32) -> bool {
@@ -89,6 +135,7 @@ mod status {
 #[cfg(any(target_os = "macos",
           target_os = "ios"))]
 mod status {
+    use libc::pid_t;
     use sys::signal::{Signal,SIGCONT};
 
     const WCOREFLAG: i32 = 0x80;
@@ -114,6 +161,10 @@ mod status {
         wstatus(status) == WSTOPPED && stop_signal(status) != SIGCONT
     }
 
+    pub fn decode_ptrace_event(pid: pid_t, status: i32) -> Option<WaitStatus> {
+        None
+    }
+
     pub fn exited(status: i32) -> bool {
         wstatus(status) == 0
     }
@@ -136,6 +187,7 @@ mod status {
           target_os = "dragonfly",
           target_os = "netbsd"))]
 mod status {
+    use libc::pid_t;
     use sys::signal::Signal;
 
     const WCOREFLAG: i32 = 0x80;
@@ -151,6 +203,10 @@ mod status {
 
     pub fn stop_signal(status: i32) -> Signal {
         Signal::from_c_int(status >> 8).unwrap()
+    }
+
+    pub fn decode_ptrace_event(pid: pid_t, status: i32) -> Option<WaitStatus> {
+        None
     }
 
     pub fn signaled(status: i32) -> bool {
@@ -184,7 +240,8 @@ fn decode(pid : pid_t, status: i32) -> WaitStatus {
     } else if status::signaled(status) {
         WaitStatus::Signaled(pid, status::term_signal(status), status::dumped_core(status))
     } else if status::stopped(status) {
-        WaitStatus::Stopped(pid, status::stop_signal(status))
+        status::decode_ptrace_event(pid, status)
+            .unwrap_or_else(|| WaitStatus::Stopped(pid, status::stop_signal(status)))
     } else {
         assert!(status::continued(status));
         WaitStatus::Continued(pid)

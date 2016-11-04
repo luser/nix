@@ -49,7 +49,7 @@ pub mod ptrace {
     pub const PTRACE_EVENT_EXEC:       PtraceEvent = 4;
     pub const PTRACE_EVENT_VFORK_DONE: PtraceEvent = 5;
     pub const PTRACE_EVENT_EXIT:       PtraceEvent = 6;
-    pub const PTRACE_EVENT_SECCOMP:    PtraceEvent = 6;
+    pub const PTRACE_EVENT_SECCOMP:    PtraceEvent = 7;
     pub const PTRACE_EVENT_STOP:       PtraceEvent = 128;
 
     pub type PtraceOptions = c_int;
